@@ -18,10 +18,12 @@ A high-performance, native Windows media widget providing real-time, synchronize
 * **🌍 100% "Definite Success" Engine:** Uses a custom-built, high-fidelity browser header spoofing engine (Chrome v146+ with sec-ch-ua hints) to naturally bypass bot protection on Boidu and Musixmatch. No manual JWT tokens required!
 * **🌍 Live Translation & Romanization:** Automatically translates foreign songs to your preferred language and generates Romanized text for Asian languages (Japanese, Korean, Mandarin, Thai, Russian etc.) using a custom Google Translate POST engine.
 * **🔀 Multi-Provider Syllable Sync:** Aggregates lyrics from massive databases. It dynamically prioritizes high-fidelity providers (Apple Music via BetterLyrics, Musixmatch via Cubey Proxy) for karaoke sync, falling back to LRCLib and Legato for line-level coverage.
-* **🖥️ Dual Display Modes:**
+** **🖥️ Triple Display Modes:**
     * **Docked Mode:** Snaps perfectly into your Windows Taskbar alongside your tray icons.
     * **Floating Mode:** Detaches into a draggable desktop widget. Remembers its exact screen position.
-    * **Locked Glass Mode:** Turns the floating widget into a 100% click-through, borderless, transparent overlay with beautiful text drop-shadows (perfect for pinning over games or wallpapers).
+    * **Fullscreen (Teleprompter):** Immersive view providing large, smooth scrolling karaoke lyrics, along with unified HUD bottom-controls (Playback, Volume, Sync, and Draggable Scrollbar).
+* **🔮 Acrylic HUD Interface:** The Fullscreen mode now features a "Frosted Glass" HUD panel at the bottom. It utilizes a real-time clipping region and Gaussian-fade gradient to blur lyrics as they pass behind the controls, ensuring maximum legibility.
+* **📏 Precision Layout Scaling:** Seamlessly transitions between 4K Teleprompter views and compact taskbar widgets. Fixed a scaling bug to ensure the widget returns to its native 480x50 size immediately when exiting fullscreen.
 * **🎨 Native Windows 11 Styling:** Utilizes Desktop Window Manager (DWM) for authentic Acrylic blur, true transparent gradients, and smooth rounded corners.
 * **🧠 Smart Window Management:** Automatically hides itself when you launch Fullscreen games or hit F11 in your browser. Includes an optional "Idle Timeout" to fade away when music is paused.
 * **🎵 Universal Media Control:** Seamlessly control playback and volume.
@@ -51,6 +53,7 @@ Take control of the widget from anywhere on your PC:
 * `Ctrl + Shift + Alt + D` : **Snap to Taskbar** (Docked Mode)
 * `Ctrl + Shift + Alt + F` : **Detach to Desktop** (Floating Mode - restores last known position)
 * `Ctrl + Shift + Alt + S` : **Toggle Click-Through Lock** (Only works in Floating Mode)
+* `Ctrl + Shift + Alt + E` : **Toggle Fullscreen Mode** (Teleprompter)
 
 ### 🏆 Credits & Acknowledgments
 This project stands on the shoulders of giants. Massive thanks to:
@@ -1775,24 +1778,38 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
         float lyricCenterY = (height - bottomBarH) * 0.45f;
         float lyricX = width * 0.1f; 
         float lineHeight = height * (g_Settings.enableTranslation || g_Settings.enableRomanization ? 0.11f : 0.065f); 
-
         Font teleFont(pFontFamily, height * 0.045f, FontStyleBold, UnitPixel);
         Font subFont(pFontFamily, height * 0.025f, FontStyleRegular, UnitPixel);
         
-        // --- FIX: Gunakan GenericTypographic agar suku kata tidak merenggang ---
         StringFormat teleFormat(StringFormat::GenericTypographic()); 
         teleFormat.SetAlignment(StringAlignmentNear);
         teleFormat.SetFormatFlags(StringFormatFlagsMeasureTrailingSpaces | teleFormat.GetFormatFlags());
+
+        float barY = height - bottomBarH;
+
+        // --- FIX 1: Potong lirik agar tidak menembus panel bawah ---
+        Region lyricClip(RectF(0, 0, (float)width, barY));
+        graphics.SetClip(&lyricClip);
 
         g_LyricHitboxes.clear(); 
         if (!state.lyrics.empty()) {
             int centerIdx = (int)round(s_smoothIndex);
             for (int i = max(0, centerIdx - 8); i < min((int)state.lyrics.size(), centerIdx + 12); i++) {
                 LyricLine& line = state.lyrics[i];
-                if (line.text.empty()) continue;
+                wstring drawText = line.text;
+                bool isInstrumental = (drawText.empty() || drawText.find_first_not_of(L" \t\n\r") == wstring::npos);
+                
+                if (isInstrumental) {
+                    // --- FIX: Avoid double instrumental lines in teleprompter ---
+                    if (i > 0) {
+                        wstring prevText = state.lyrics[i-1].text;
+                        if (prevText.empty() || prevText.find_first_not_of(L" \t\n\r") == wstring::npos) continue;
+                    }
+                    drawText = L"♪ ♪ ♪";
+                }
 
                 float yPos = lyricCenterY + (i - s_smoothIndex) * lineHeight;
-                RectF lineRect; graphics.MeasureString(line.text.c_str(), -1, &teleFont, PointF(0,0), &teleFormat, &lineRect);
+                RectF lineRect; graphics.MeasureString(drawText.c_str(), -1, &teleFont, PointF(0,0), &teleFormat, &lineRect);
                 
                 LyricHitbox hb; hb.index = i; hb.rect = RectF(lyricX, yPos, lineRect.Width, lineRect.Height * 1.6f);
                 g_LyricHitboxes.push_back(hb);
@@ -1811,11 +1828,11 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
                 
                 long syncTimeMs = renderTimeMs;
                 if (i < state.currentLineIndex) {
-                    graphics.DrawString(line.text.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &passedB);
+                    graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &passedB);
                 } else if (i == state.currentLineIndex) {
                     SolidBrush glowBrush(Color(30, 255, 255, 255)); 
-                    graphics.DrawString(line.text.c_str(), -1, &teleFont, PointF(-1, 0), &teleFormat, &glowBrush);
-                    graphics.DrawString(line.text.c_str(), -1, &teleFont, PointF(1, 0), &teleFormat, &glowBrush);
+                    graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(-1, 0), &teleFormat, &glowBrush);
+                    graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(1, 0), &teleFormat, &glowBrush);
                     
                     if (!line.words.empty()) {
                         float curX = 0;
@@ -1824,7 +1841,6 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
                             float wW = wR.Width > 0.1f ? wR.Width : 1.0f;
                             float prog = (syncTimeMs > w.startTimeMs && w.durationMs > 0) ? (float)(syncTimeMs - w.startTimeMs) / w.durationMs : 0.0f;
                             
-                            // --- FIX 2: Kembalikan rumus animasi Karaoke dari Docked Mode ---
                             if (prog > 0.0f && prog < 1.0f) {
                                 Color c1(alpha, 255, 255, 255);
                                 Color c2(128 * alpha / 255, 255, 255, 255);
@@ -1839,18 +1855,51 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
                             else graphics.DrawString(w.text.c_str(), -1, &teleFont, PointF(curX, 0), &teleFormat, &inactB);
                             curX += wW;
                         }
-                    } else graphics.DrawString(line.text.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &actB);
+                    } else {
+                        // --- LINE SYNC FALLBACK (Same as Docked Mode) ---
+                        float lineProg = (syncTimeMs > line.startTimeMs && line.durationMs > 0) ? (float)(syncTimeMs - line.startTimeMs) / line.durationMs : 0.0f;
+                        if (lineProg > 0.0f && lineProg < 1.0f) {
+                            float bW = lineRect.Width > 0.1f ? lineRect.Width : 1.0f;
+                            Color c1(alpha, 255, 255, 255);
+                            Color c2(128 * alpha / 255, 255, 255, 255);
+                            LinearGradientBrush grad(PointF(0, 0), PointF(bW, 0), c1, c2);
+                            float f[] = {0.0f, 0.0f, 1.0f, 1.0f};
+                            float pPos = lineProg + 0.001f;
+                            if (pPos > 1.0f) pPos = 1.0f;
+                            float p[] = {0.0f, lineProg, pPos, 1.0f};
+                            grad.SetBlend(f, p, 4);
+                            graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &grad);
+                        } else if (lineProg >= 1.0f) graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &actB);
+                        else graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &inactB);
+                    }
                 } else {
-                    graphics.DrawString(line.text.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &inactB);
+                    graphics.DrawString(drawText.c_str(), -1, &teleFont, PointF(0, 0), &teleFormat, &inactB);
                 }
 
-                // Subtitle Romanization/Translation
+                // Subtitle Romanization/Translation (Animated like Docked Mode)
                 float subY = lineRect.Height + 1.0f;
                 auto DrawSub = [&](const wstring& text) {
-                    if (i < state.currentLineIndex) graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &passedB);
-                    else if (i == state.currentLineIndex) graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &actB);
-                    else graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &inactB);
                     RectF sR; graphics.MeasureString(text.c_str(), -1, &subFont, PointF(0,0), &teleFormat, &sR);
+                    if (i < state.currentLineIndex) {
+                        graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &passedB);
+                    } else if (i == state.currentLineIndex) {
+                        float subProg = (syncTimeMs > line.startTimeMs && line.durationMs > 0) ? (float)(syncTimeMs - line.startTimeMs) / line.durationMs : 0.0f;
+                        if (subProg > 0.0f && subProg < 1.0f) {
+                            float bW = sR.Width > 0.1f ? sR.Width : 1.0f;
+                            Color c1(alpha, 255, 255, 255);
+                            Color c2(128 * alpha / 255, 255, 255, 255);
+                            LinearGradientBrush grad(PointF(0, 0), PointF(bW, 0), c1, c2);
+                            float f[] = {0.0f, 0.0f, 1.0f, 1.0f};
+                            float pPos = subProg + 0.001f;
+                            if (pPos > 1.0f) pPos = 1.0f;
+                            float p[] = {0.0f, subProg, pPos, 1.0f};
+                            grad.SetBlend(f, p, 4);
+                            graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &grad);
+                        } else if (subProg >= 1.0f) graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &actB);
+                        else graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &inactB);
+                    } else {
+                        graphics.DrawString(text.c_str(), -1, &subFont, PointF(0, subY), &teleFormat, &inactB);
+                    }
                     subY += sR.Height;
                 };
 
@@ -1861,14 +1910,23 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
             }
         }
 
-        float barY = height - bottomBarH;
+        // Tutup clip lirik, kembalikan ke render normal seluruh layar
+        graphics.ResetClip();
+
+        // --- HUD Frosted Panel with Fade (Acrylic Blur) ---
+        float fadeHeight = 60.0f;
+        // Fade out lyrics as they approach the HUD
+        LinearGradientBrush fadeGrad(PointF(0, barY - fadeHeight), PointF(0, barY), Color(0, 10, 10, 10), Color(100, 10, 10, 10));
+        graphics.FillRectangle(&fadeGrad, 0.0f, barY - fadeHeight, (float)width, fadeHeight);
         
-        // --- FIX 5: HUD Panel ("Blur" Frosted Background) ---
-        // Membuat kotak panel background solid yang mensimulasikan pemisahan HUD dari lirik
-        SolidBrush hudBg(Color(230, 15, 15, 15)); // Panel sangat gelap, hampir opaq
+        // Acrylic HUD Background: Subtle dark tint (alpha 120) to show off the system blur
+        SolidBrush hudBg(Color(120, 15, 15, 15)); 
         graphics.FillRectangle(&hudBg, 0.0f, barY, (float)width, bottomBarH);
-        Pen hudBorder(Color(40, 255, 255, 255), 1.0f); // Garis atas panel
+        
+        // Glass highlight (Top Border)
+        Pen hudBorder(Color(60, 255, 255, 255), 1.2f); 
         graphics.DrawLine(&hudBorder, 0.0f, barY, (float)width, barY);
+
 
         // 1. Album Art & Song Info
         float artSize = bottomBarH * 0.55f; // Album art diperkecil lagi
@@ -2164,8 +2222,8 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
 
     auto DrawSingleLine = [&](float startX, float alpha, LyricLine &lineData,
                               int scrollOffset) {
-      if (lineData.text.empty())
-        return;
+      wstring drawText = lineData.text;
+      if (drawText.empty() || drawText.find_first_not_of(L" \t\n\r") == wstring::npos) drawText = L"♪ ♪ ♪";
 
       // Cap max opacity to 80% (204) if locked floating, else 100% (255)
       int maxAlpha = isLockedFloating ? 204 : 255;
@@ -2182,7 +2240,7 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
       SolidBrush shadowBrush(Color((int)(aVal * 0.8f), 0, 0, 0)); // Black Shadow
 
       RectF mainBound, romBound, transBound;
-      graphics.MeasureString(lineData.text.c_str(), -1, &font, PointF(0, 0),
+      graphics.MeasureString(drawText.c_str(), -1, &font, PointF(0, 0),
                              &format, &mainBound);
 
       float totalHeight = mainBound.Height;
@@ -2297,13 +2355,13 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
           float p[] = {0.0f, lineProgress, pPos, 1.0f};
           grad.SetBlend(f, p, 4);
 
-          graphics.DrawString(lineData.text.c_str(), -1, &font,
+          graphics.DrawString(drawText.c_str(), -1, &font,
                               PointF(dX, currentY), &format, &grad);
         } else if (lineProgress >= 1.0f) {
-          graphics.DrawString(lineData.text.c_str(), -1, &font,
+          graphics.DrawString(drawText.c_str(), -1, &font,
                               PointF(dX, currentY), &format, &aBrush);
         } else {
-          graphics.DrawString(lineData.text.c_str(), -1, &font,
+          graphics.DrawString(drawText.c_str(), -1, &font,
                               PointF(dX, currentY), &format, &iBrush);
         }
       }
@@ -2649,36 +2707,37 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam,
       UpdateAppearance(hwnd);
       PostMessage(hwnd, WM_APP + 10, 0, 0); // Force snap
       InvalidateRect(hwnd, NULL, TRUE);
-    } else if (wParam == 2) { // Floating Unlocked
+    } else if (wParam == 2) { // Floating Unlocked (Ctrl+Shift+Alt+F)
       g_Settings.displayMode = 1;
       g_Settings.isLocked = false;
       UpdateAppearance(hwnd);
 
-      // FIX: Restore the last known floating position (if it exists)
-      if (g_FloatX != -9999 && g_FloatY != -9999) {
-        SetWindowPos(hwnd, HWND_TOPMOST, g_FloatX, g_FloatY, 0, 0,
-                     SWP_NOSIZE | SWP_NOACTIVATE);
-      }
+      // FIX: Restore the last known floating position and force size to 480x50
+      int rx = (g_FloatX != -9999) ? g_FloatX : 100;
+      int ry = (g_FloatY != -9999) ? g_FloatY : 100;
+      
+      // We explicitly set 480x50 and add SWP_FRAMECHANGED to kill the "Huge" window bug
+      SetWindowPos(hwnd, HWND_TOPMOST, rx, ry, 480, 50, 
+                   SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
 
       InvalidateRect(hwnd, NULL, TRUE);
     } else if (wParam == 3 && g_Settings.displayMode == 1) { // Lock toggle
       g_Settings.isLocked = !g_Settings.isLocked;
       UpdateAppearance(hwnd);
       InvalidateRect(hwnd, NULL, TRUE);
-    } else if (wParam == 4) { // Fullscreen Toggle
+    } else if (wParam == 4) { // Fullscreen Toggle via Ctrl+Shift+Alt+E
       if (g_Settings.displayMode == 2) {
-          // RESTORE TO SPECIFIC LAST STATE (Fix "Stuck" Issue)
           g_Settings.displayMode = g_LastDisplayMode;
           UpdateAppearance(hwnd);
-          if (g_Settings.displayMode == 1) { // Return to Floating
+          if (g_Settings.displayMode == 1) { 
               int rx = (g_FloatX != -9999) ? g_FloatX : 100;
               int ry = (g_FloatY != -9999) ? g_FloatY : 100;
-              SetWindowPos(hwnd, HWND_TOPMOST, rx, ry, g_Settings.width, g_Settings.height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-          } else { // Return to Docked
+              // FIX 2: Kembalikan ukuran ke 480x50 secara eksplisit
+              SetWindowPos(hwnd, HWND_TOPMOST, rx, ry, 480, 50, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+          } else { 
               PostMessage(hwnd, WM_APP + 10, 0, 0); 
           }
       } else {
-          // CAPTURE CURRENT STATE BEFORE FULLSCREEN
           g_LastDisplayMode = g_Settings.displayMode;
           g_Settings.displayMode = 2;
           UpdateAppearance(hwnd);
@@ -2916,16 +2975,22 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     
     if (g_Settings.displayMode == 2) {
-        ReleaseCapture(); // Selalu rilis capture jika di Mode 2 saat klik lepas
+        ReleaseCapture(); 
 
-        if (g_HoverState == 8) { // EXIT FULLSCREEN (CLOSE)
+        if (g_HoverState == 8) { // EXIT FULLSCREEN (Tombol Close)
             g_Settings.displayMode = g_LastDisplayMode;
             UpdateAppearance(hwnd);
-            if (g_Settings.displayMode == 1) { 
+            
+            // FIX 2: Reset ukuran jendela secara absolut ke 480x50
+            int targetW = 480; // Ukuran default Floating
+            int targetH = 50;  // Ukuran default Floating
+            
+            if (g_Settings.displayMode == 1) { // Mode Floating
                 int rx = (g_FloatX != -9999) ? g_FloatX : 100;
                 int ry = (g_FloatY != -9999) ? g_FloatY : 100;
-                SetWindowPos(hwnd, HWND_TOPMOST, rx, ry, g_Settings.width, g_Settings.height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            } else { 
+                // Paksa ukuran balik ke setting asli agar tidak "Huge"
+                SetWindowPos(hwnd, HWND_TOPMOST, rx, ry, targetW, targetH, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+            } else { // Mode Docked
                 PostMessage(hwnd, WM_APP + 10, 0, 0); 
             }
             InvalidateRect(hwnd, NULL, TRUE);
@@ -2935,14 +3000,27 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         if (g_HoverState == 7) {
             g_IsManualScroll = false;
             InvalidateRect(hwnd, NULL, FALSE);
-        } else if (g_HoverState == 6) { // SEEKBAR SCRUBBING
+        } else if (g_HoverState == 6) { // FIX 3: SEEKBAR SCRUBBING
             RECT rc; GetClientRect(hwnd, &rc);
-            float w = (float)rc.right; float h = (float)rc.bottom;
-            float seekW = w * 0.4f;
+            float w = (float)rc.right; 
+            float seekW = w * 0.3f; // Harus sama dengan visual (0.3f)
             float seekX = (w - seekW) / 2.0f;
-            int x = LOWORD(lParam);
-            float pct = max(0.0f, min(1.0f, (float)(x - seekX) / seekW));
-            SeekToPosition((long)(pct * g_MediaState.durationMs));
+            
+            POINT pt; GetCursorPos(&pt);
+            ScreenToClient(hwnd, &pt); // Gunakan ScreenToClient untuk akurasi posisi
+            
+            float pct = (float)(pt.x - seekX) / seekW;
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+
+            long safeDur = 0;
+            {
+                lock_guard<mutex> guard(g_MediaState.lock);
+                safeDur = g_MediaState.durationMs;
+                if (safeDur <= 0 && !g_MediaState.lyrics.empty()) {
+                    safeDur = g_MediaState.lyrics.back().startTimeMs + g_MediaState.lyrics.back().durationMs;
+                }
+            }
+            if (safeDur > 0) SeekToPosition((long)(pct * safeDur));
         } else if (g_HoveredLyricIndex != -1) { // LYRIC SEEK
             long targetTimeMs = -1;
             {
