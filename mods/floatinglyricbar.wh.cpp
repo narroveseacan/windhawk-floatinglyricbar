@@ -356,6 +356,7 @@ void LoadSettings() {
 
 // --- WinRT / GSMTC ---
 GlobalSystemMediaTransportControlsSessionManager g_SessionManager = nullptr;
+GlobalSystemMediaTransportControlsSession g_CurrentSession = nullptr;
 
 Bitmap *StreamToBitmap(IRandomAccessStreamWithContentType const &stream) {
   if (!stream)
@@ -1345,6 +1346,82 @@ void FetchLyrics(wstring title, wstring artist, wstring album,
           ReplaceAll(fullRom, L"| ", L"|"); // Crush trailing spaces
           ReplaceAll(fullRom, L" |", L"|"); // Crush leading spaces
 
+          // --- RE-TRANSLITERATION ENGINE (Human Readable Fixes) ---
+          // Detect if we are dealing with Thai to apply specific phonetics
+          bool isThai = false;
+          for (wchar_t c : allText) {
+              if (c >= 0x0E00 && c <= 0x0E7F) { isThai = true; break; }
+          }
+
+          if (isThai) {
+              // PHASE 1: Hardcoded Visual-Order Exceptions
+              ReplaceAll(fullRom, L"h̄ịm", L"mai");
+              ReplaceAll(fullRom, L"h̄ı̂", L"hai");
+              ReplaceAll(fullRom, L"k̆", L"ko");
+              ReplaceAll(fullRom, L"bk", L"bok");
+
+              // PHASE 2: Silent Clusters & Anomalies
+              ReplaceAll(fullRom, L"cring", L"jing");
+              ReplaceAll(fullRom, L"xy", L"y");
+              ReplaceAll(fullRom, L"h̄w", L"w");
+              ReplaceAll(fullRom, L"h̄m", L"m");
+              ReplaceAll(fullRom, L"h̄n", L"n");
+              ReplaceAll(fullRom, L"h̄l", L"l");
+              ReplaceAll(fullRom, L"thr", L"s");
+
+              // PHASE 3: Vowels & Main Consonants (Indonesian/English Mapping)
+              ReplaceAll(fullRom, L"æ", L"ae");
+              ReplaceAll(fullRom, L"eā", L"ao");
+              ReplaceAll(fullRom, L"ea", L"ao");
+              ReplaceAll(fullRom, L"ụ̄", L"eu");
+              ReplaceAll(fullRom, L"ụ", L"eu");
+              ReplaceAll(fullRom, L"x", L"o");
+              ReplaceAll(fullRom, L"ı", L"ai");
+              ReplaceAll(fullRom, L"ị", L"ai");
+              
+              // Protect 'ch' before mapping 'c' to 'j'
+              ReplaceAll(fullRom, L"ch", L"CH_TEMP");
+              ReplaceAll(fullRom, L"c", L"j");
+              ReplaceAll(fullRom, L"CH_TEMP", L"ch");
+
+              // PHASE 4: Final Consonant Mutations (Aturan Huruf Mati)
+              for (size_t i = 0; i < fullRom.length(); i++) {
+                  wchar_t c = fullRom[i];
+                  // Check if we are at the end of a syllable/word or before our delimiter
+                  bool isEnd = (i == fullRom.length() - 1 || fullRom[i+1] == L' ' || 
+                               (i + 3 < fullRom.length() && fullRom.substr(i+1, 3) == L"|||"));
+                  
+                  if (isEnd) {
+                      if (c == L'b') fullRom[i] = L'p';
+                      else if (c == L'd' || c == L's') fullRom[i] = L't';
+                      else if (c == L'r' || c == L'l') fullRom[i] = L'n';
+                      else if (c == L'g') fullRom[i] = L'k';
+                  }
+              }
+          }
+
+          // PHASE 5: Final Diacritic Wipe (Math-Logic Stripper)
+          // Clears remaining tone marks and flattens back to pure A-Z ASCII
+          for (size_t i = 0; i < fullRom.length(); i++) {
+              wchar_t& c = fullRom[i];
+              if (c > 127) {
+                  if ((c >= 0x00C0 && c <= 0x00C5) || (c >= 0x00E0 && c <= 0x00E5) || c == 0x0101 || c == 0x1EAD) c = (c <= 0x00C5) ? L'A' : L'a';
+                  else if ((c >= 0x00C8 && c <= 0x00CB) || (c >= 0x00E8 && c <= 0x00EB) || c == 0x0113) c = (c <= 0x00CB) ? L'E' : L'e';
+                  else if ((c >= 0x00CC && c <= 0x00CF) || (c >= 0x00EC && c <= 0x00EF) || c == 0x012B || c == 0x1ECB) c = (c <= 0x00CF) ? L'I' : L'i';
+                  else if ((c >= 0x00D2 && c <= 0x00D6) || (c >= 0x00F2 && c <= 0x00F6) || c == 0x014D) c = (c <= 0x00D6) ? L'O' : L'o';
+                  else if ((c >= 0x00D9 && c <= 0x00DC) || (c >= 0x00F9 && c <= 0x00FC) || c == 0x016B) c = (c <= 0x00DC) ? L'U' : L'u';
+                  else if (c == 0x00F1 || c == 0x00D1) c = (c == 0x00D1) ? L'N' : L'n';
+                  else if (c == 0x00E6 || c == 0x00C6) { // æ -> ae
+                      size_t pos = i;
+                      fullRom.replace(pos, 1, (c == 0x00C6) ? L"AE" : L"ae");
+                      i++; // Skip the new 'e'
+                  }
+
+                  // Ignore common punctuation or leave as is if no mapping found
+              }
+          }
+
+
           // FIX: Slice the Romanized string back into lines using our delimiter
           size_t start = 0;
           size_t end = 0;
@@ -1405,30 +1482,52 @@ void UpdateMediaInfo() {
     auto sessionsList = g_SessionManager.GetSessions();
     GlobalSystemMediaTransportControlsSession session = nullptr;
 
-    // Priority for YouTube Music if available
+    GlobalSystemMediaTransportControlsSession playingPrimary = nullptr;
+    GlobalSystemMediaTransportControlsSession playingOther = nullptr;
+    GlobalSystemMediaTransportControlsSession pausedPrimary = nullptr;
+    GlobalSystemMediaTransportControlsSession pausedOther = nullptr;
+
     for (auto const &s : sessionsList) {
       try {
-        auto props = s.TryGetMediaPropertiesAsync().get();
-        wstring title = props.Title().c_str();
-        if (title.find(L"YouTube Music") != wstring::npos) {
-          session = s;
-          break;
+        auto info = s.GetPlaybackInfo();
+        if (!info) continue;
+        
+        bool isPlaying = (info.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+        bool isPrimary = false;
+        
+        wstring appId = s.SourceAppUserModelId().c_str();
+        for (auto &c : appId) c = towlower(c);
+        
+        if (appId.find(L"spotify") != wstring::npos || 
+           (appId.find(L"youtube") != wstring::npos && appId.find(L"music") != wstring::npos)) {
+
+          isPrimary = true;
+        } else {
+
+          auto props = s.TryGetMediaPropertiesAsync().get();
+          wstring title = props.Title().c_str();
+          if (title.find(L"YouTube Music") != wstring::npos) {
+            isPrimary = true;
+          }
         }
-      } catch (...) {
-      }
+
+        if (isPlaying) {
+          if (isPrimary && !playingPrimary) playingPrimary = s;
+          else if (!isPrimary && !playingOther) playingOther = s;
+        } else {
+          if (isPrimary && !pausedPrimary) pausedPrimary = s;
+          else if (!isPrimary && !pausedOther) pausedOther = s;
+        }
+      } catch (...) {}
     }
 
-    if (!session) {
-      for (auto const &s : sessionsList) {
-        auto pb = s.GetPlaybackInfo();
-        if (pb && pb.PlaybackStatus() ==
-                      GlobalSystemMediaTransportControlsSessionPlaybackStatus::
-                          Playing) {
-          session = s;
-          break;
-        }
-      }
-    }
+    if (playingPrimary) session = playingPrimary;
+    else if (playingOther) session = playingOther;
+    else if (pausedPrimary) session = pausedPrimary;
+    else session = pausedOther;
+
+    g_CurrentSession = session;
+
 
     // Retain last media info if session is lost
     if (!session) {
@@ -1474,13 +1573,18 @@ void UpdateMediaInfo() {
         }).detach();
       }
 
-      // Try to fetch art if missing (fixes delayed thumbnail issue)
-      if (!g_MediaState.albumArt) {
+      // Try to fetch art if missing or recently changed song (Fixes stale thumbnail issue)
+      bool recentlyChanged = (GetTickCount64() - g_MediaState.lastSongChangeTime < 5000);
+      if (!g_MediaState.albumArt || recentlyChanged) {
         auto thumbRef = props.Thumbnail();
         if (thumbRef) {
           try {
             auto stream = thumbRef.OpenReadAsync().get();
-            g_MediaState.albumArt = StreamToBitmap(stream);
+            Bitmap* newArt = StreamToBitmap(stream);
+            if (newArt) {
+                if (g_MediaState.albumArt) delete g_MediaState.albumArt;
+                g_MediaState.albumArt = newArt;
+            }
           } catch (...) {}
         }
       }
@@ -1524,7 +1628,7 @@ void UpdateMediaInfo() {
 void SendMediaCommand(int cmd) {
   try {
     if (!g_SessionManager) return;
-    auto session = g_SessionManager.GetCurrentSession();
+    auto session = g_CurrentSession ? g_CurrentSession : g_SessionManager.GetCurrentSession();
     if (session) {
       if (cmd == 1 || cmd == 12) session.TrySkipPreviousAsync();
       else if (cmd == 2 || cmd == 13) session.TryTogglePlayPauseAsync();
@@ -1541,7 +1645,7 @@ void SendMediaCommand(int cmd) {
 void SeekToPosition(long timeMs) {
   try {
     if (!g_SessionManager) return;
-    auto session = g_SessionManager.GetCurrentSession();
+    auto session = g_CurrentSession ? g_CurrentSession : g_SessionManager.GetCurrentSession();
     if (session) {
       // GSMTC uses 100-nanosecond ticks (1ms = 10,000 ticks)
       long long ticks = (long long)timeMs * 10000LL;
@@ -2062,12 +2166,19 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
   // Layout: Prev(12) > Art(9) > Next(14) > Fullscreen(1)
   float pX = 18.0f * (float)scale;
   int artSize = height - 12;
-  float internalGap = 4.0f * (float)scale; // Tightened
-  float artX = pX + hitRadius + internalGap;
+  float internalGap = 4.0f * (float)scale;
+
+  // Stability: Calculate the zone where controls should stay expanded
+  float expandedArtX = pX + hitRadius + internalGap;
+  float expandedNextX = expandedArtX + artSize + internalGap + hitRadius;
+  bool showPrev = (g_HoverState == 12 || g_HoverState == 9 || g_HoverState == 14 || g_HoverState == 15); // 15 is the "Zone" ID
+  
+  float artX = showPrev ? expandedArtX : (10.0f * (float)scale);
   int artY = 6;
   float nX = artX + artSize + internalGap + hitRadius;
-  float fsX = nX + gap;
-  int textX = 6;
+  
+  int textX = (int)(nX + hitRadius + (8.0f * (float)scale));
+  int textMaxW = width - textX - 10;
 
   if (!isLockedFloating) {
     SolidBrush iconBrush{mainColor};
@@ -2088,13 +2199,15 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
     float iconW = 10.0f * (float)scale;
     float iconH = 14.0f * (float)scale;
 
-    // --- 1. Skip Previous ---
-    DrawControlBg(12, pX);
-    PointF prevPts[3] = {PointF(pX + (iconW/3), (float)controlY - (iconH/2)),
-                         PointF(pX + (iconW/3), (float)controlY + (iconH/2)),
-                         PointF(pX - (iconW/4), (float)controlY)};
-    graphics.FillPolygon(&iconBrush, prevPts, 3);
-    graphics.FillRectangle(&iconBrush, pX - (iconW/2), (float)controlY - (iconH/2), 2.0f * (float)scale, iconH);
+    // --- 1. Skip Previous (Hidden unless hovering Art or self) ---
+    if (g_HoverState == 9 || g_HoverState == 12) {
+        DrawControlBg(12, pX);
+        PointF prevPts[3] = {PointF(pX + (iconW/3), (float)controlY - (iconH/2)),
+                             PointF(pX + (iconW/3), (float)controlY + (iconH/2)),
+                             PointF(pX - (iconW/4), (float)controlY)};
+        graphics.FillPolygon(&iconBrush, prevPts, 3);
+        graphics.FillRectangle(&iconBrush, pX - (iconW/2), (float)controlY - (iconH/2), 2.0f * (float)scale, iconH);
+    }
 
     // --- 2. Album Art with Center Play/Pause ---
     GraphicsPath path;
@@ -2111,12 +2224,18 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
 
     // Always draw Play/Pause indicator on top (whether art exists or not) if hovered/waiting
     if (g_HoverState > 0 || state.title.empty()) {
+        
         if (state.albumArt) {
             SolidBrush darkBrush(Color(120, 0, 0, 0));
             graphics.FillRectangle(&darkBrush, (float)artX, (float)artY, (float)artSize, (float)artSize);
         } else {
             SolidBrush darkBrush(Color(60, 0, 0, 0));
             graphics.FillRectangle(&darkBrush, (float)artX, (float)artY, (float)artSize, (float)artSize);
+        }
+
+        // Draw the blue hover background on top of the dark overlay for consistent luminosity
+        if (g_HoverState == 9) {
+            DrawControlBg(9, artX + artSize / 2.0f);
         }
         
         float artCenterX = artX + artSize / 2.0f;
@@ -2147,20 +2266,42 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
     graphics.FillPolygon(&iconBrush, nextPts, 3);
     graphics.FillRectangle(&iconBrush, nX + (iconW/2) - (2.0f * (float)scale), (float)controlY - (iconH/2), 2.0f * (float)scale, iconH);
 
-    // --- 4. Fullscreen Toggle ---
-    DrawControlBg(1, fsX);
-    float fsSize = 12.0f * (float)scale;
-    Pen fsPen(&iconBrush, 1.5f * (float)scale);
-    graphics.DrawRectangle(&fsPen, fsX - (fsSize/2), (float)controlY - (fsSize/2), fsSize, fsSize);
-    graphics.FillRectangle(&iconBrush, fsX - (1.0f * (float)scale), (float)controlY - (1.0f * (float)scale), 2.0f * (float)scale, 2.0f * (float)scale);
+    // --- 4. Fullscreen Toggle (Lyric Area) ---
+    textX = (int)(nX + hitRadius + (8.0f * (float)scale));
+    int lyricEndX = width - 10;
+    if (g_Settings.displayMode == 1 && !g_Settings.isLocked) {
+        lyricEndX -= (int)(24.0f * scale);
+    }
 
-    textX = (int)(fsX + hitRadius + (12.0f * (float)scale));
+    if (g_HoverState == 1) {
+        Font fsLabelFont(pFontFamily, 11.0f * (float)scale, FontStyleBold, UnitPixel);
+        wstring fsLabel = L"fullscreen \x2197";
+        RectF labelRect;
+        graphics.MeasureString(fsLabel.c_str(), -1, &fsLabelFont, PointF(0, 0), &labelRect);
+
+        float labelX = (float)lyricEndX - labelRect.Width - (8.0f * (float)scale);
+        
+        // --- REFINED HOVER: Only wrap the text/icon ---
+        GraphicsPath bgPath;
+        AddRoundedRect(bgPath, (int)(labelX - 6), (int)(controlY - btnSize/2), (int)(labelRect.Width + 12), (int)btnSize, 4);
+        graphics.FillPath(&hoverBg, &bgPath);
+        graphics.DrawPath(&accentBorder, &bgPath);
+        
+        graphics.DrawString(fsLabel.c_str(), -1, &fsLabelFont, 
+            PointF(labelX, (float)controlY - labelRect.Height/2), 
+            &iconBrush);
+
+        // Adjust textMaxW to avoid overlapping the label
+        textMaxW = (int)(labelX - textX - (8.0f * (float)scale));
+    } else {
+        textMaxW = lyricEndX - textX;
+    }
+
   } else {
     // Locked floating mode: Minimal art + text
     textX = 6;
+    textMaxW = width - textX - 10;
   }
-
-  int textMaxW = width - textX - 10;
 
   // --- Draw Floating Lock Button ---
   if (g_Settings.displayMode == 1 && !g_Settings.isLocked) {
@@ -2696,6 +2837,16 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam,
       if (g_Settings.displayMode == 2) {
           InvalidateRect(hwnd, NULL, FALSE); // Force 60fps refresh for smooth scroll
       }
+      // Handle Spacebar in Fullscreen Mode (even without focus)
+      if (g_Settings.displayMode == 2) {
+          static bool spaceWasDown = false;
+          bool spaceIsDown = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+          if (spaceIsDown && !spaceWasDown) {
+              SendMediaCommand(13); // Toggle Play/Pause
+          }
+          spaceWasDown = spaceIsDown;
+      }
+
       InvalidateRect(hwnd, NULL, FALSE);
     }
     return 0;
@@ -2744,6 +2895,13 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam,
           PostMessage(hwnd, WM_APP + 10, 0, 0); 
       }
       InvalidateRect(hwnd, NULL, TRUE);
+    }
+    return 0;
+
+  case WM_KEYDOWN:
+    if (g_Settings.displayMode == 2 && wParam == VK_SPACE) {
+        SendMediaCommand(13); // ID 13 is Toggle Play/Pause
+        return 0;
     }
     return 0;
 
@@ -2936,16 +3094,23 @@ LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam,
 
         // Layout: Prev(12) > Art(9) > Next(14) > Fullscreen(1)
         float pX = 18.0f * (float)scale;
-        float artX = pX + hitRadius + internalGap;
+
+        float expandedArtX = pX + hitRadius + internalGap;
+        float expandedNextX = expandedArtX + artSize + internalGap + hitRadius;
+
+        // Determination: If we are in the "Control Zone" (left side), we force showPrev logic
+        bool showPrev = (x < expandedNextX + (20.0f * (float)scale));
+        float artX = showPrev ? expandedArtX : (10.0f * (float)scale);
         float nX = artX + artSize + internalGap + hitRadius;
-        float fsX = nX + gap;
+        float textX = nX + hitRadius + (8.0f * (float)scale);
 
         // Expanded vertical hit area (full bar height instead of just y=6..h-6)
         if (x >= 0 && x <= g_Settings.width) {
-            if (abs(x - pX) < hitRadius) newState = 12;
+            if (showPrev && abs(x - pX) < hitRadius) newState = 12;
             else if (x >= artX && x <= artX + artSize) newState = 9;
             else if (abs(x - nX) < hitRadius) newState = 14;
-            else if (abs(x - fsX) < hitRadius) newState = 1;
+            else if (x >= textX) newState = 1;
+            else if (showPrev) newState = 15; // In the zone but not on a button
             else newState = 4;
         }
 
